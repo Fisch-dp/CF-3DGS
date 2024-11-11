@@ -97,6 +97,7 @@ class CFGaussianTrainer(GaussianTrainer):
                    ref_fidx=None,
                    reset=True,
                    reproj_loss=None,
+                   no_backward=False,
                    **kwargs,
                    ):
         # Render
@@ -132,7 +133,8 @@ class CFGaussianTrainer(GaussianTrainer):
                                       ref_fidx, **kwargs)
 
         loss = loss_dict['loss']
-        loss.backward()
+        if not no_backward:
+            loss.backward()
 
         with torch.no_grad():
             # Progress bar
@@ -143,7 +145,7 @@ class CFGaussianTrainer(GaussianTrainer):
             # mask = visibility_filter.reshape(gt_image.shape[1:])[None]
             psnr_train = psnr(image, gt_image).mean().double()
             self.just_reset = False
-            if iteration < optim_opt.densify_until_iter and densify:
+            if iteration < optim_opt.densify_until_iter and densify and not no_backward:
                 # Keep track of max radii in image-space for pruning
                 try:
                     gs_render.gaussians.max_radii2D[visibility_filter] = torch.max(gs_render.gaussians.max_radii2D[visibility_filter],
@@ -162,10 +164,10 @@ class CFGaussianTrainer(GaussianTrainer):
                     gs_render.gaussians.reset_opacity()
                     self.just_reset = True
 
-            if update_gaussians:
+            if update_gaussians and not no_backward:
                 gs_render.gaussians.optimizer.step()
                 gs_render.gaussians.optimizer.zero_grad(set_to_none=True)
-            if getattr(gs_render.gaussians, "camera_optimizer", None) is not None and update_cam:
+            if getattr(gs_render.gaussians, "camera_optimizer", None) is not None and update_cam and not no_backward:
                 current_fidx = gs_render.gaussians.seq_idx
                 gs_render.gaussians.camera_optimizer[current_fidx].step()
                 gs_render.gaussians.camera_optimizer[current_fidx].zero_grad(
@@ -305,14 +307,37 @@ class CFGaussianTrainer(GaussianTrainer):
                                                               viewpoint_cam_ref, iteration,
                                                               pipe, optim_opt,
                                                               densify=False,
+                                                              no_backward=True,
                                                               )
-            self.gs_render_local2.P = self.gs_render_local.gaussians.get_RT_inverse()
-            _, _, psnr_train2 = self.train_step(self.gs_render_local2,
+            loss1, _, psnr_train2 = self.train_step(self.gs_render_local2,
                                                               viewpoint_cam_ref2, iteration,
                                                               pipe, optim_opt,
                                                               densify=False,
+                                                              no_backward=True,
                                                               )
+            # Loss on pose of inverse of pose2 and pose1
+            rotation_loss, translation_loss = self.pose_loss(self.gs_render_local.gaussians.P, self.gs_render_local2.gaussians.P)
+            # print(f"Rotation loss: {rotation_loss}, Translation loss: {translation_loss}")
+            loss = 0.45 * loss["loss"] + 0.45 * loss1["loss"] + 0.1 * (translation_loss + 0.1 * rotation_loss)
+            loss.backward()
             self.gs_render_local.P = self.gs_render_local2.gaussians.get_RT_inverse()
+
+            with torch.no_grad():
+                self.gs_render_local.gaussians.optimizer.step()
+                self.gs_render_local2.gaussians.optimizer.zero_grad(set_to_none=True)
+                self.gs_render_local.gaussians.optimizer.step()
+                self.gs_render_local2.gaussians.optimizer.zero_grad(set_to_none=True)
+                if getattr(self.gs_render_local.gaussians, "camera_optimizer", None):
+                    current_fidx = self.gs_render_local.gaussians.seq_idx
+                    self.gs_render_local.gaussians.camera_optimizer[current_fidx].step()
+                    self.gs_render_local.gaussians.camera_optimizer[current_fidx].zero_grad(
+                        set_to_none=True)
+                if getattr(self.gs_render_local2.gaussians, "camera_optimizer", None):
+                    current_fidx = self.gs_render_local2.gaussians.seq_idx
+                    self.gs_render_local2.gaussians.camera_optimizer[current_fidx].step()
+                    self.gs_render_local2.gaussians.camera_optimizer[current_fidx].zero_grad(
+                        set_to_none=True)
+                
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"PSNR": f"{psnr_train:.{2}f}",
                                           "PSNR2": f"{psnr_train2:.{2}f}",
@@ -824,6 +849,21 @@ class CFGaussianTrainer(GaussianTrainer):
 
         loss_dict = self.loss_func(image, gt_image, **kwargs)
         return loss_dict
+    
+    def pose_loss(self, pose1, pose2):
+        pose1_4x4 = pose1.matrix()
+        pose2_4x4 = pose2.matrix()
+        # rotation(Geodesic Distance)
+        R1 = pose1_4x4[:3, :3]
+        R2 = pose2_4x4[:3, :3]
+        rotation_loss = torch.acos((torch.trace(R1 @ R2.T) - 1) / 2)
+        # translation
+        t1 = pose1_4x4[:3, 3]
+        t2 = pose2_4x4[:3, 3]
+        translation_loss = torch.norm(t1 - t2)
+        return rotation_loss, translation_loss
+        
+
 
     def visualize(self, render_pkg, filename, gt_image=None, gt_depth=None, save_ply=False):
         os.makedirs(os.path.dirname(filename), exist_ok=True)
