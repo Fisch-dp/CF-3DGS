@@ -70,6 +70,8 @@ class CFGaussianTrainer(GaussianTrainer):
                                    view_dependent=model_cfg.view_dependent,)
         self.gs_render_local = GS_Render(white_background=False,
                                          view_dependent=model_cfg.view_dependent,)
+        self.gs_render_local2 = GS_Render(white_background=False,
+                                         view_dependent=model_cfg.view_dependent,)
         self.use_mask = self.pipe_cfg.use_mask
         self.use_mono = self.pipe_cfg.use_mono
         self.near = 0.01
@@ -225,9 +227,15 @@ class CFGaussianTrainer(GaussianTrainer):
         cam_info, pcd, viewpoint_cam = self.prepare_data(view_idx_prev,
                                                          orthogonal=True,
                                                          down_sample=True)
+        _, pcd2, viewpoint_cam2 = self.prepare_data(view_idx,
+                                                    orthogonal=True,
+                                                    down_sample=True)
         radius = np.linalg.norm(pcd.points, axis=1).max()
+        radius2 = np.linalg.norm(pcd2.points, axis=1).max()
         self.gs_render_local.reset_model()
         self.gs_render_local.init_model(pcd)
+        self.gs_render_local2.reset_model()
+        self.gs_render_local2.init_model(pcd2)
         # Fit current gaussian
         optim_opt.iterations = 1000
         optim_opt.densify_from_iter = optim_opt.iterations + 1
@@ -235,24 +243,39 @@ class CFGaussianTrainer(GaussianTrainer):
                             desc="Training progress")
         self.gs_render_local.gaussians.training_setup(
             optim_opt, fix_pos=True,)
+        self.gs_render_local2.gaussians.training_setup(
+            optim_opt, fix_pos=True,)
+        psnr_train = 0
+        psnr_train2 = 0
         for iteration in range(1, optim_opt.iterations+1):
             # Update learning rate
             self.gs_render_local.gaussians.update_learning_rate(iteration)
+            self.gs_render_local2.gaussians.update_learning_rate(iteration)
             loss, rend_dict, psnr_train = self.train_step(self.gs_render_local,
-                                                          viewpoint_cam, iteration,
-                                                          pipe, optim_opt,
-                                                          #   depth_gt=self.mono_depth[view_idx_prev],
-                                                          update_gaussians=True,
-                                                          update_cam=False,
-                                                          updata_distort=False,
-                                                          densify=False,
-                                                          )
-            if psnr_train > 35 and iteration > 500:
+                                                        viewpoint_cam, iteration,
+                                                        pipe, optim_opt,
+                                                        #   depth_gt=self.mono_depth[view_idx_prev],
+                                                        update_gaussians=True,
+                                                        update_cam=False,
+                                                        updata_distort=False,
+                                                        densify=False,
+                                                        )
+            _, _, psnr_train2 = self.train_step(self.gs_render_local2,
+                                                        viewpoint_cam2, iteration,
+                                                        pipe, optim_opt,
+                                                        #   depth_gt=self.mono_depth[view_idx_prev],
+                                                        update_gaussians=True,
+                                                        update_cam=False,
+                                                        updata_distort=False,
+                                                        densify=False,
+                                                        )
+            if psnr_train > 35 and psnr_train2 > 35 and iteration > 500:
                 progress_bar.close()
                 break
 
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"PSNR": f"{psnr_train:.{2}f}",
+                                          "PSNR2": f"{psnr_train2:.{2}f}",
                                           "Number points": f"{self.gs_render.gaussians.get_xyz.shape[0]}"})
                 progress_bar.update(10)
             if iteration == optim_opt.iterations:
@@ -261,10 +284,15 @@ class CFGaussianTrainer(GaussianTrainer):
         print(f"optimizing frame {view_idx:03d}")
         viewpoint_cam_ref = self.load_viewpoint_cam(view_idx,
                                                     load_depth=True)
+        viewpoint_cam_ref2 = self.load_viewpoint_cam(view_idx_prev,
+                                                    load_depth=True)
         optim_opt.iterations = 300
         optim_opt.densify_from_iter = optim_opt.iterations + 1
         self.gs_render_local.gaussians.init_RT(None)
         self.gs_render_local.gaussians.training_setup_fix_position(
+            optim_opt, gaussian_rot=False)
+        self.gs_render_local2.gaussians.init_RT(None)
+        self.gs_render_local2.gaussians.training_setup_fix_position(
             optim_opt, gaussian_rot=False)
 
         progress_bar = tqdm(range(optim_opt.iterations),
@@ -272,13 +300,22 @@ class CFGaussianTrainer(GaussianTrainer):
         for iteration in range(1, optim_opt.iterations+1):
             # Update learning rate
             self.gs_render_local.gaussians.update_learning_rate(iteration)
+            self.gs_render_local2.gaussians.update_learning_rate(iteration)
             loss, rend_dict_ref, psnr_train = self.train_step(self.gs_render_local,
                                                               viewpoint_cam_ref, iteration,
                                                               pipe, optim_opt,
                                                               densify=False,
                                                               )
+            self.gs_render_local2.P = self.gs_render_local.gaussians.get_RT_inverse()
+            # _, _, psnr_train2 = self.train_step(self.gs_render_local2,
+            #                                                   viewpoint_cam_ref2, iteration,
+            #                                                   pipe, optim_opt,
+            #                                                   densify=False,
+            #                                                   )
+            self.gs_render_local.P = self.gs_render_local2.gaussians.get_RT_inverse()
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"PSNR": f"{psnr_train:.{2}f}",
+                                          "PSNR2": f"{psnr_train2:.{2}f}",
                                           "Number points": f"{self.gs_render.gaussians.get_xyz.shape[0]}"})
                 progress_bar.update(10)
             if iteration == optim_opt.iterations:

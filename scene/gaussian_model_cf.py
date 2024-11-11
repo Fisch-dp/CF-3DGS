@@ -145,6 +145,18 @@ class CFGaussianModel:
                 Rt = self.P[idx].retr().matrix()
 
         return Rt.squeeze()
+    
+    def get_RT_inverse(self, idx=None):
+        if getattr(self, "P", None) is None:
+            return torch.eye(4, device="cuda")
+        
+        if self.rotate_xyz:
+            Rt = self.P[0].retr().inv().matrix()
+        else:
+            if idx is None:
+                Rt = self.P[self.seq_idx].retr().inv().matrix()
+            else:
+                Rt = self.P[idx].retr().inv().matrix()
 
     def set_seq_idx(self, idx):
         if idx < 0:
