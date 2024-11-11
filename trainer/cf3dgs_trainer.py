@@ -307,11 +307,11 @@ class CFGaussianTrainer(GaussianTrainer):
                                                               densify=False,
                                                               )
             self.gs_render_local2.P = self.gs_render_local.gaussians.get_RT_inverse()
-            # _, _, psnr_train2 = self.train_step(self.gs_render_local2,
-            #                                                   viewpoint_cam_ref2, iteration,
-            #                                                   pipe, optim_opt,
-            #                                                   densify=False,
-            #                                                   )
+            _, _, psnr_train2 = self.train_step(self.gs_render_local2,
+                                                              viewpoint_cam_ref2, iteration,
+                                                              pipe, optim_opt,
+                                                              densify=False,
+                                                              )
             self.gs_render_local.P = self.gs_render_local2.gaussians.get_RT_inverse()
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"PSNR": f"{psnr_train:.{2}f}",
